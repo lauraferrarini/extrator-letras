@@ -219,7 +219,7 @@
         .mb-2{margin-bottom:20px;}
         .mb-3{margin-bottom:30px;}
 
-        /* CSS Específico do Fluxo */
+        /* CSS Específico */
         .search-box-initial {
             max-width: 500px;
             margin: 60px auto;
@@ -281,11 +281,23 @@
             margin-bottom: 15px;
         }
 
+        .source-selector-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #fafafa;
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+        }
+
         @media(max-width:768px){
             body{ padding:15px; }
             .container{ padding:18px; }
             .grid-2, .grid-3, .grid-4, .split-layout{ grid-template-columns:1fr; }
             .album-header { flex-direction: column; text-align: center; }
+            .source-selector-bar { flex-direction: column; gap: 8px; align-items: flex-start; }
         }
     </style>
 </head>
@@ -293,7 +305,7 @@
 
 <div class="container">
 
-    <!-- ESTADO 1: INICIAL (Centralizado) -->
+    <!-- ESTADO 1: INICIAL -->
     <div id="view-initial" class="search-box-initial">
         <h1>Extrair Letras do Apple Music</h1>
         <p class="subtitle">Insira o link de um álbum do Apple Music para carregar as faixas e visualizar as letras de cada música.</p>
@@ -303,10 +315,10 @@
         </div>
     </div>
 
-    <!-- ESTADO 2 e 3: VISUALIZAÇÃO DO ÁLBUM E LETRAS -->
+    <!-- ESTADO 2 e 3: OVERVIEW E LETRAS -->
     <div id="view-app" style="display: none;">
         
-        <!-- Barra do Topo -->
+        <!-- Barra Superior -->
         <div class="top-bar">
             <div class="nav-menu">
                 <a onclick="resetApp()">← Buscar outro álbum</a>
@@ -321,10 +333,10 @@
 
         <hr class="mb-2" style="border:0; border-top:1px solid var(--border);">
 
-        <!-- Container Dinâmico (Muda entre Visão Completa e Split) -->
+        <!-- Container Dinâmico -->
         <div id="layout-container">
 
-            <!-- Painel do Álbum (Esquerda na Split / Topo na Completa) -->
+            <!-- Painel do Álbum (Overview) -->
             <div id="album-panel">
                 <div class="album-header">
                     <img id="album-cover-img" class="album-cover" src="" alt="Capa do Álbum">
@@ -332,6 +344,20 @@
                         <h1 id="album-title">Nome do Álbum</h1>
                         <p class="subtitle" id="album-artist" style="margin-bottom: 8px;">Nome do Artista</p>
                         <p class="text-muted" id="album-info">0 faixas</p>
+                    </div>
+                </div>
+
+                <!-- Seletor de Fonte -->
+                <div class="source-selector-bar">
+                    <div>
+                        <strong>Fonte das Letras:</strong> 
+                        <span class="text-muted">Escolha de onde extrair as letras do álbum</span>
+                    </div>
+                    <div style="width: 180px;">
+                        <select id="select-source" onchange="changeLyricSource(this.value)">
+                            <option value="genius" selected>Genius (Padrão)</option>
+                            <option value="lrclib">LRCLIB</option>
+                        </select>
                     </div>
                 </div>
 
@@ -352,7 +378,7 @@
                 </div>
             </div>
 
-            <!-- Painel da Letra (Direita na Split) -->
+            <!-- Painel da Letra -->
             <div id="lyrics-panel" style="display: none;">
                 <div class="card mb-2">
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;" class="mb-2">
@@ -369,7 +395,7 @@
                     </div>
 
                     <div class="card-title">Compositores / Créditos</div>
-                    <p id="lyrics-writers" class="text-muted">Não informado</p>
+                    <p id="lyrics-writers" class="text-muted">Buscando...</p>
                 </div>
             </div>
 
@@ -384,7 +410,7 @@
     let currentTracks = [];
     let albumMetaData = {};
     let lyricsCache = {}; 
-    let currentSource = 'genius'; // Padrão: Genius
+    let currentSource = 'genius';
     let selectedTrackId = null;
 
     function checkEnter(event, source) {
@@ -410,7 +436,6 @@
             return;
         }
 
-        // Regex para extrair o ID do Álbum
         const albumIdMatch = url.match(/\/album\/(?:[^\/]+\/)?(?:id)?(\d+)/i) || url.match(/id=(\d+)/i);
         
         if (!albumIdMatch || !albumIdMatch[1]) {
@@ -424,7 +449,6 @@
 
     async function fetchAlbumData(albumId) {
         try {
-            // Requisição para a iTunes Search API (Pública, sem CORS)
             const response = await fetch(`https://itunes.apple.com/lookup?id=${albumId}&entity=song`);
             const data = await response.json();
 
@@ -433,7 +457,6 @@
                 return;
             }
 
-            // Separa os dados do Álbum e das Faixas
             albumMetaData = data.results.find(item => item.wrapperType === 'collection');
             currentTracks = data.results.filter(item => item.wrapperType === 'track');
 
@@ -442,14 +465,10 @@
 
             renderAlbumOverview();
 
-            // Troca de tela
             document.getElementById('view-initial').style.display = 'none';
             document.getElementById('view-app').style.display = 'block';
 
-            // Reseta para visão normal (não split) ao carregar novo álbum
             setLayoutMode('overview');
-
-            // Checa a disponibilidade das letras de todas as faixas em segundo plano
             checkLyricsAvailability();
 
         } catch (error) {
@@ -459,7 +478,6 @@
     }
 
     function renderAlbumOverview() {
-        // Imagem de alta resolução substituindo 100x100 por 600x600
         const highResCover = albumMetaData.artworkUrl100.replace('100x100bb', '600x600bb');
         
         document.getElementById('album-cover-img').src = highResCover;
@@ -509,7 +527,6 @@
     }
 
     async function checkLyricsAvailability() {
-        // Busca a letra na LRCLIB em paralelo para cada faixa
         currentTracks.forEach(async (track) => {
             const lyricsData = await fetchLyrics(track);
             lyricsCache[track.trackId] = lyricsData;
@@ -533,11 +550,11 @@
         }
     }
 
-    // Busca via Genius extraindo os compositores reais
+    // Busca via Genius (API oficial de detalhes + Scrape da Letra)
     async function fetchLyricsFromGenius(track) {
         const artist = track.artistName;
         const trackName = track.trackName;
-        const appleComposer = track.composerName || 'Não informado';
+        const fallbackComposer = track.composerName || track.artistName;
 
         try {
             const query = `${artist} ${trackName}`;
@@ -545,39 +562,40 @@
             const searchUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/search/multi?q=${encodeURIComponent(query)}`)}`;
 
             const response = await fetch(searchUrl);
-            if (!response.ok) throw new Error('Falha no Genius');
+            if (!response.ok) throw new Error('Falha no Search Genius');
             
             const data = await response.json();
             const sections = data.response?.sections || [];
             const songHit = sections.flatMap(s => s.hits || []).find(h => h.type === 'song');
 
-            if (!songHit || !songHit.result?.url) {
-                return { hasLyrics: false, plainLyrics: 'Música não encontrada no Genius.', writerName: appleComposer };
+            if (!songHit || !songHit.result) {
+                return { hasLyrics: false, plainLyrics: 'Música não encontrada no Genius.', writerName: fallbackComposer };
             }
 
-            const songPageUrl = `${proxyUrl}${encodeURIComponent(songHit.result.url)}`;
-            const pageResponse = await fetch(songPageUrl);
+            const songId = songHit.result.id;
+            const songPageUrl = songHit.result.url;
+
+            let finalWriters = fallbackComposer;
+
+            // Busca os compositores oficiais na API interna do Genius
+            try {
+                const songApiUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/songs/${songId}`)}`;
+                const songRes = await fetch(songApiUrl);
+                if (songRes.ok) {
+                    const songData = await songRes.json();
+                    const writers = songData.response?.song?.writer_artists;
+                    if (writers && writers.length > 0) {
+                        finalWriters = writers.map(w => w.name).join(', ');
+                    }
+                }
+            } catch(e) {
+                console.warn("Não foi possível carregar compositores via Genius API:", e);
+            }
+
+            // Busca o HTML da página para extrair o texto da letra
+            const pageResponse = await fetch(`${proxyUrl}${encodeURIComponent(songPageUrl)}`);
             const htmlText = await pageResponse.text();
 
-            // 1. Extração dos Compositores no Genius (Objeto writerArtists)
-            let geniusWriters = [];
-            const matchPreloaded = htmlText.match(/window\.__PRELOADED_STATE__\s*=\s*JSON\.parse\((.*?)\);/s);
-            if (matchPreloaded && matchPreloaded[1]) {
-                try {
-                    const rawJson = JSON.parse(matchPreloaded[1]);
-                    const state = JSON.parse(rawJson);
-                    const songData = Object.values(state?.songPage?.songData || {})[0];
-                    if (songData && songData.writerArtists && songData.writerArtists.length > 0) {
-                        geniusWriters = songData.writerArtists.map(w => w.name);
-                    }
-                } catch(e) {
-                    console.error("Erro ao processar JSON do Genius:", e);
-                }
-            }
-
-            const finalWriters = geniusWriters.length > 0 ? geniusWriters.join(', ') : appleComposer;
-
-            // 2. Extração da Letra
             const parser = new DOMParser();
             const doc = parser.parseFromString(htmlText, 'text/html');
             const containers = doc.querySelectorAll('[data-lyrics-container="true"]');
@@ -603,7 +621,7 @@
             return {
                 hasLyrics: false,
                 plainLyrics: 'Erro ao conectar ao Genius. Tente trocar a fonte para LRCLIB.',
-                writerName: appleComposer
+                writerName: fallbackComposer
             };
         }
     }
@@ -612,17 +630,16 @@
     async function fetchLyricsFromLRCLIB(track) {
         const artist = track.artistName;
         const trackName = track.trackName;
-        const appleComposer = track.composerName || 'Não informado';
+        const fallbackComposer = track.composerName || track.artistName;
 
         try {
-             const response = await fetch(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(trackName)}`);
-            
+            const response = await fetch(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(trackName)}`);
             if (response.ok) {
                 const data = await response.json();
                 return {
                     hasLyrics: !!data.plainLyrics,
                     plainLyrics: data.plainLyrics || 'Letra não encontrada.',
-                    writerName: data.author || appleComposer
+                    writerName: data.author || fallbackComposer
                 };
             }
         } catch (e) {
@@ -632,7 +649,7 @@
         return {
             hasLyrics: false,
             plainLyrics: 'Letra indisponível na LRCLIB.',
-            writerName: appleComposer
+            writerName: fallbackComposer
         };
     }
 
@@ -641,15 +658,12 @@
         const track = currentTracks.find(t => t.trackId === trackId);
         if (!track) return;
 
-        // Destaque visual na tabela
         document.querySelectorAll('tbody tr').forEach(row => row.classList.remove('active-track-row'));
         const selectedRow = document.getElementById(`track-row-${trackId}`);
         if (selectedRow) selectedRow.classList.add('active-track-row');
 
-        // Ativa o layout split (Menu lateral + Área da Letra)
         setLayoutMode('split');
 
-        // Preenche as informações da música
         document.getElementById('lyrics-track-title').innerText = track.trackName;
         document.getElementById('lyrics-track-artist').innerText = track.artistName;
 
