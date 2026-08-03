@@ -573,7 +573,8 @@
         const fallbackComposer = track.composerName || track.artistName;
 
         try {
-            const query = `${artist} ${trackName}`;
+            // Consulta para buscar especificamente a letra da faixa
+            const query = `${artist} ${trackName} lyrics`;
             const proxyUrl = `https://corsproxy.io/?`;
             const searchUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/search/multi?q=${encodeURIComponent(query)}`)}`;
 
@@ -582,7 +583,14 @@
             
             const data = await response.json();
             const sections = data.response?.sections || [];
-            const songHit = sections.flatMap(s => s.hits || []).find(h => h.type === 'song');
+            const hits = sections.flatMap(s => s.hits || []);
+
+            // Filtra exclusivamente hits do tipo "song" e que contêm o sufixo "-lyrics" na URL (evita calendários/listas)
+            const songHit = hits.find(h => {
+                if (h.type !== 'song' || !h.result?.url) return false;
+                const url = h.result.url.toLowerCase();
+                return url.includes('-lyrics') && !url.includes('calendar') && !url.includes('tracklist');
+            }) || hits.find(h => h.type === 'song');
 
             if (!songHit || !songHit.result) {
                 return { hasLyrics: false, plainLyrics: 'Música não encontrada no Genius.', writerName: fallbackComposer };
@@ -608,7 +616,7 @@
                 console.warn("Não foi possível carregar compositores via Genius API:", e);
             }
 
-            // Busca o HTML da página para extrair o texto da letra
+            // Extração da Letra via Scraping da página da música
             const pageResponse = await fetch(`${proxyUrl}${encodeURIComponent(songPageUrl)}`);
             const htmlText = await pageResponse.text();
 
@@ -626,9 +634,20 @@
                 textLyrics += c.textContent + '\n\n';
             });
 
+            // Limpeza contra resíduos de cabeçalho do Genius
+            let cleanLyrics = textLyrics.trim()
+                .replace(/^\d+\s+Contributors.*?\n/i, '')
+                .replace(/^Read More.*?\n/gm, '')
+                .replace(/Embed$/i, '');
+
+            // Validação de segurança: Se a letra contiver palavras de calendário/lista, rejeita
+            if (cleanLyrics.includes("SINGLES RELEASE CALENDAR") || cleanLyrics.includes("Contributors")) {
+                return { hasLyrics: false, plainLyrics: 'Não foi possível identificar a letra oficial.', writerName: fallbackComposer };
+            }
+
             return {
-                hasLyrics: textLyrics.trim().length > 0,
-                plainLyrics: textLyrics.trim() || 'Letra vazia.',
+                hasLyrics: cleanLyrics.length > 0,
+                plainLyrics: cleanLyrics || 'Letra vazia.',
                 writerName: finalWriters
             };
 
