@@ -363,28 +363,25 @@
                     </div>
                 </div>
 
-                <!-- Seletor de Fonte + Fallback para Link Direto -->
+                <!-- Seletor de Fonte -->
                 <div class="source-selector-bar">
-                    <div class="source-selector-row">
-                        <div>
-                            <strong>Fonte das Letras:</strong> 
-                            <span class="text-muted">Escolha de onde extrair as letras do álbum</span>
-                        </div>
-                        <div style="width: 180px;">
-                            <select id="select-source" onchange="changeLyricSource(this.value)">
-                                <option value="genius" selected>Genius (Padrão)</option>
-                                <option value="lrclib">LRCLIB</option>
-                            </select>
-                        </div>
+                    <div>
+                        <strong>Fonte das Letras:</strong> 
+                        <span class="text-muted">Escolha de onde extrair as letras do álbum</span>
+                    </div>
+                    <div style="width: 180px;">
+                        <select id="select-source" onchange="changeLyricSource(this.value)">
+                            <option value="genius" selected>Genius (Padrão)</option>
+                            <option value="lrclib">LRCLIB</option>
+                        </select>
                     </div>
 
-                    <!-- Botão e Caixa de Correção Manual -->
-                    <div style="border-top: 1px dashed var(--border); padding-top: 6px; margin-top: 2px;">
-                        <a class="wrong-info-trigger" onclick="toggleWrongInfoBox()">Informações erradas?</a>
-                        
-                        <div id="box-wrong-info" class="wrong-info-box" style="display: none;">
-                            <input type="text" id="input-custom-genius" placeholder="Cole o link do Genius" onkeydown="if(event.key==='Enter') fetchCustomGeniusLyrics()">
-                            <button onclick="fetchCustomGeniusLyrics()" style="padding: 6px 12px; font-size: 10px; white-space: nowrap;">Carregar</button>
+                    <!-- Caixa de Texto para Link Direto do Álbum no Genius -->
+                    <div id="genius-album-input-container" style="display: none; width: 100%; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px;">
+                        <span class="text-muted" style="display: block; margin-bottom: 5px;">Cole o link do álbum no Genius para vincular diretamente todas as faixas:</span>
+                        <div class="search-input-group" style="margin-top: 0;">
+                            <input type="text" id="input-genius-album" placeholder="Cole o link do Genius (ex: https://genius.com/albums/...)">
+                            <button onclick="applyGeniusAlbumLink()">Carregar</button>
                         </div>
                     </div>
                 </div>
@@ -438,6 +435,7 @@
     let currentTracks = [];
     let albumMetaData = {};
     let lyricsCache = {}; 
+    let geniusCustomMap = {}; // Mapeamento direto via Link de Álbum do Genius
     let currentSource = 'genius';
     let selectedTrackId = null;
 
@@ -453,16 +451,19 @@
         }
     }
 
-    function toggleWrongInfoBox() {
-        const box = document.getElementById('box-wrong-info');
-        box.style.display = box.style.display === 'none' ? 'flex' : 'none';
+    function toggleGeniusAlbumInput() {
+        const container = document.getElementById('genius-album-input-container');
+        container.style.display = container.style.display === 'none' ? 'block' : 'none';
     }
 
     function resetApp() {
         document.getElementById('view-app').style.display = 'none';
         document.getElementById('view-initial').style.display = 'block';
         document.getElementById('input-url-initial').value = '';
+        document.getElementById('genius-album-input-container').style.display = 'none';
+        document.getElementById('input-genius-album').value = '';
         lyricsCache = {};
+        geniusCustomMap = {};
         selectedTrackId = null;
     }
 
@@ -500,6 +501,7 @@
             currentTracks = data.results.filter(item => item.wrapperType === 'track');
 
             lyricsCache = {};
+            geniusCustomMap = {};
             selectedTrackId = null;
 
             renderAlbumOverview();
@@ -547,6 +549,108 @@
         });
     }
 
+    async function applyGeniusAlbumLink() {
+        const geniusUrl = document.getElementById('input-genius-album').value.trim();
+        if (!geniusUrl || !geniusUrl.includes('genius.com')) {
+            alert('Por favor, cole um link válido do Genius.');
+            return;
+        }
+
+        const proxyUrl = `https://corsproxy.io/?`;
+        try {
+            const response = await fetch(`${proxyUrl}${encodeURIComponent(geniusUrl)}`);
+            if (!response.ok) throw new Error('Falha ao carregar página do Genius');
+            
+            const htmlText = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlText, 'text/html');
+
+            let geniusAlbumTracks = [];
+
+            // 1. Tenta pegar faixas do estado predefinido do Genius
+            const matchPreloaded = htmlText.match(/window\.__PRELOADED_STATE__\s*=\s*JSON\.parse\((.*?)\);/s);
+            if (matchPreloaded && matchPreloaded[1]) {
+                try {
+                    const rawJson = JSON.parse(matchPreloaded[1]);
+                    const state = JSON.parse(rawJson);
+                    const albumTracksData = state?.albumPage?.tracks || state?.entities?.albums?.[Object.keys(state?.entities?.albums || {})[0]]?.tracks || [];
+                    
+                    geniusAlbumTracks = albumTracksData.map(t => ({
+                        title: t.song?.title || '',
+                        url: t.song?.url || '',
+                        id: t.song?.id || null,
+                        writers: (t.song?.writer_artists || []).map(w => w.name).join(', ')
+                    })).filter(t => t.url);
+                } catch(e) {
+                    console.warn("Erro no preloaded_state do Genius Album:", e);
+                }
+            }
+
+            // 2. Fallback de busca de links no HTML
+            if (geniusAlbumTracks.length === 0) {
+                const anchors = Array.from(doc.querySelectorAll('a[href*="-lyrics"]'));
+                const uniqueUrls = new Set();
+                anchors.forEach(a => {
+                    const href = a.href;
+                    const text = a.textContent.trim();
+                    if (href && !href.includes('/albums/') && !href.includes('calendar') && !uniqueUrls.has(href)) {
+                        uniqueUrls.add(href);
+                        geniusAlbumTracks.push({ title: text, url: href, id: null, writers: '' });
+                    }
+                });
+            }
+
+            if (geniusAlbumTracks.length === 0) {
+                alert('Não foi possível extrair as faixas desse link do Genius.');
+                return;
+            }
+
+            // Mapeia cada faixa do Apple Music para a correspondente do Genius
+            geniusCustomMap = {};
+            currentTracks.forEach((track, index) => {
+                const trackNorm = normalizeStr(track.trackName);
+                
+                // Busca por nome correspondente
+                let found = geniusAlbumTracks.find(gt => {
+                    const gtNorm = normalizeStr(gt.title);
+                    return gtNorm.includes(trackNorm) || trackNorm.includes(gtNorm);
+                });
+
+                // Se não achar por nome, usa a ordem da lista
+                if (!found && geniusAlbumTracks[index]) {
+                    found = geniusAlbumTracks[index];
+                }
+
+                if (found) {
+                    geniusCustomMap[track.trackId] = found;
+                }
+            });
+
+            // Reseta cache, seleciona Genius e atualiza faixas
+            lyricsCache = {};
+            document.getElementById('select-source').value = 'genius';
+            currentSource = 'genius';
+            
+            // Atualiza visualização dos badges
+            currentTracks.forEach(track => {
+                const badgeContainer = document.getElementById(`badge-container-${track.trackId}`);
+                if (badgeContainer) badgeContainer.innerHTML = `<span class="badge warning">Verificando...</span>`;
+            });
+
+            checkLyricsAvailability();
+
+            if (selectedTrackId) {
+                selectTrack(selectedTrackId, true);
+            }
+
+            alert('Faixas do Genius vinculadas com sucesso!');
+
+        } catch (e) {
+            console.error('Erro ao processar álbum do Genius:', e);
+            alert('Ocorreu um erro ao acessar o link do Genius.');
+        }
+    }
+
     function changeLyricSource(newSource) {
         currentSource = newSource;
         lyricsCache = {}; 
@@ -589,69 +693,82 @@
         }
     }
 
-    // Busca via Genius (API oficial de detalhes + Scrape da Letra)
     async function fetchLyricsFromGenius(track) {
         const artist = track.artistName;
         const trackName = track.trackName;
         const fallbackComposer = track.composerName || track.artistName;
+        const proxyUrl = `https://corsproxy.io/?`;
 
         try {
-            const query = `${artist} ${trackName}`;
-             const proxyUrl = `https://corsproxy.io/?`;
-            const searchUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/search/multi?q=${encodeURIComponent(query)}`)}`;
+            let songPageUrl = '';
+            let songId = null;
+            let customWriters = '';
 
-            const response = await fetch(searchUrl);
-            if (!response.ok) throw new Error('Falha no Search Genius');
-            
-            const data = await response.json();
-            const sections = data.response?.sections || [];
-            const hits = sections.flatMap(s => s.hits || []);
+            // Se existir mapeamento direto vindo do link do Genius fornecido pelo usuário
+            if (geniusCustomMap[track.trackId]) {
+                songPageUrl = geniusCustomMap[track.trackId].url;
+                songId = geniusCustomMap[track.trackId].id;
+                customWriters = geniusCustomMap[track.trackId].writers;
+            } else {
+                // Busca padrão na API do Genius
+                const query = `${artist} ${trackName}`;
+                const searchUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/search/multi?q=${encodeURIComponent(query)}`)}`;
 
-            const targetArtistNorm = normalizeStr(artist);
-            const targetTrackNorm = normalizeStr(trackName);
+                const response = await fetch(searchUrl);
+                if (!response.ok) throw new Error('Falha no Search Genius');
+                
+                const data = await response.json();
+                const sections = data.response?.sections || [];
+                const hits = sections.flatMap(s => s.hits || []);
 
-            const validHit = hits.find(h => {
-                if (h.type !== 'song' || !h.result || !h.result.url) return false;
+                const targetArtistNorm = normalizeStr(artist);
+                const targetTrackNorm = normalizeStr(trackName);
 
-                const url = h.result.url.toLowerCase();
-                const fullTitle = (h.result.full_title || '').toLowerCase();
+                const validHit = hits.find(h => {
+                    if (h.type !== 'song' || !h.result || !h.result.url) return false;
 
-                const blacklist = ['calendar', 'tracklist', 'discography', 'booklet', 'credits', 'album-art', 'release-date', 'contributors'];
-                if (blacklist.some(term => url.includes(term) || fullTitle.includes(term))) {
-                    return false;
+                    const url = h.result.url.toLowerCase();
+                    const fullTitle = (h.result.full_title || '').toLowerCase();
+
+                    const blacklist = ['calendar', 'tracklist', 'discography', 'booklet', 'credits', 'album-art', 'release-date', 'contributors'];
+                    if (blacklist.some(term => url.includes(term) || fullTitle.includes(term))) {
+                        return false;
+                    }
+
+                    const hitTitleNorm = normalizeStr(h.result.title);
+                    const hitArtistNorm = normalizeStr(h.result.primary_artist?.name);
+
+                    const isTitleMatch = hitTitleNorm.includes(targetTrackNorm) || targetTrackNorm.includes(hitTitleNorm);
+                    const isArtistMatch = hitArtistNorm.includes(targetArtistNorm) || targetArtistNorm.includes(hitArtistNorm);
+
+                    return isTitleMatch && isArtistMatch;
+                });
+
+                if (!validHit || !validHit.result) {
+                    return { hasLyrics: false, plainLyrics: 'Música não encontrada no Genius para este álbum.', writerName: fallbackComposer };
                 }
 
-                const hitTitleNorm = normalizeStr(h.result.title);
-                const hitArtistNorm = normalizeStr(h.result.primary_artist?.name);
-
-                const isTitleMatch = hitTitleNorm.includes(targetTrackNorm) || targetTrackNorm.includes(hitTitleNorm);
-                const isArtistMatch = hitArtistNorm.includes(targetArtistNorm) || targetArtistNorm.includes(hitArtistNorm);
-
-                return isTitleMatch && isArtistMatch;
-            });
-
-            if (!validHit || !validHit.result) {
-                return { hasLyrics: false, plainLyrics: 'Música não encontrada no Genius para este álbum.', writerName: fallbackComposer };
+                songId = validHit.result.id;
+                songPageUrl = validHit.result.url;
             }
 
-            const songId = validHit.result.id;
-            const songPageUrl = validHit.result.url;
+            let finalWriters = customWriters || fallbackComposer;
 
-            let finalWriters = fallbackComposer;
-
-            // Busca os compositores oficiais na API interna do Genius
-            try {
-                const songApiUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/songs/${songId}`)}`;
-                const songRes = await fetch(songApiUrl);
-                if (songRes.ok) {
-                    const songData = await songRes.json();
-                    const writers = songData.response?.song?.writer_artists;
-                    if (writers && writers.length > 0) {
-                        finalWriters = writers.map(w => w.name).join(', ');
+            // Se não tivermos os compositores ainda e houver um ID de música do Genius
+            if (!customWriters && songId) {
+                try {
+                    const songApiUrl = `${proxyUrl}${encodeURIComponent(`https://genius.com/api/songs/${songId}`)}`;
+                    const songRes = await fetch(songApiUrl);
+                    if (songRes.ok) {
+                        const songData = await songRes.json();
+                        const writers = songData.response?.song?.writer_artists;
+                        if (writers && writers.length > 0) {
+                            finalWriters = writers.map(w => w.name).join(', ');
+                        }
                     }
+                } catch(e) {
+                    console.warn("Não foi possível carregar compositores via Genius API:", e);
                 }
-            } catch(e) {
-                console.warn("Não foi possível carregar compositores via Genius API:", e);
             }
 
             // Extração da Letra via Scraping da página da música
@@ -699,79 +816,7 @@
         }
     }
 
-    // Puxa diretamente do link informado manualmente
-    async function fetchCustomGeniusLyrics() {
-        if (!selectedTrackId) {
-            alert('Por favor, selecione uma faixa da lista primeiro.');
-            return;
-        }
-
-        const input = document.getElementById('input-custom-genius');
-        const customUrl = input.value.trim();
-
-        if (!customUrl || !customUrl.includes('genius.com')) {
-            alert('Cole um link válido do Genius (ex: https://genius.com/nome-da-musica-lyrics).');
-            return;
-        }
-
-        const track = currentTracks.find(t => t.trackId === selectedTrackId);
-        if (!track) return;
-
-        document.getElementById('lyrics-text').innerText = 'Extraindo letra do link fornecido...';
-        document.getElementById('lyrics-writers').innerText = 'Carregando...';
-
-        try {
-            const proxyUrl = `https://corsproxy.io/?`;
-            const pageResponse = await fetch(`${proxyUrl}${encodeURIComponent(customUrl)}`);
-            
-            if (!pageResponse.ok) throw new Error('Não foi possível carregar o link.');
-
-            const htmlText = await pageResponse.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(htmlText, 'text/html');
-            const containers = doc.querySelectorAll('[data-lyrics-container="true"]');
-
-            if (containers.length === 0) {
-                alert('Não foi possível encontrar o bloco de letras no link colado.');
-                document.getElementById('lyrics-text').innerText = 'Letra não encontrada no link fornecido.';
-                return;
-            }
-
-            let textLyrics = '';
-            containers.forEach(c => {
-                c.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
-                textLyrics += c.textContent + '\n\n';
-            });
-
-            let cleanLyrics = textLyrics.trim();
-            let finalWriters = track.composerName || track.artistName;
-
-            const lyricsData = {
-                hasLyrics: cleanLyrics.length > 0,
-                plainLyrics: cleanLyrics || 'Letra vazia.',
-                writerName: finalWriters
-            };
-
-            lyricsCache[selectedTrackId] = lyricsData;
-
-            document.getElementById('lyrics-text').innerText = lyricsData.plainLyrics;
-            document.getElementById('lyrics-writers').innerText = lyricsData.writerName;
-
-            const badgeContainer = document.getElementById(`badge-container-${selectedTrackId}`);
-            if (badgeContainer) {
-                badgeContainer.innerHTML = `<span class="badge success">Tem letra</span>`;
-            }
-
-            input.value = '';
-            document.getElementById('box-wrong-info').style.display = 'none';
-
-        } catch (e) {
-            console.error('Erro ao buscar link customizado:', e);
-            alert('Erro ao carregar o link informado. Verifique se a URL está correta.');
-            document.getElementById('lyrics-text').innerText = 'Erro ao carregar letra do link fornecido.';
-        }
-    }
-
+    // Busca via LRCLIB API
     async function fetchLyricsFromLRCLIB(track) {
         const artist = track.artistName;
         const trackName = track.trackName;
