@@ -446,12 +446,32 @@ const CORS_PROXIES = [
     (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
 ];
 
+// Faz um fetch com um limite de tempo, para que um proxy que trava não
+// impeça de tentar o próximo da lista.
+async function fetchWithTimeout(url, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Busca uma URL como texto (HTML), tentando cada proxy até um funcionar.
+// Também confirma que o conteúdo devolvido realmente parece ser do site de
+// destino: alguns proxies gratuitos (ex: corsproxy.io), quando estão
+// sobrecarregados/bloqueando o pedido, respondem 200 OK mas com a própria
+// página inicial do serviço de proxy em vez do site solicitado — sem essa
+// checagem isso passava como "sucesso" e quebrava a extração mais na frente.
 async function fetchHtmlViaProxy(url) {
     let lastError = null;
+    let hostHint = '';
+    try { hostHint = new URL(url).hostname.replace(/^www\./, '').split('.')[0].toLowerCase(); } catch (e) {}
+
     for (const buildProxyUrl of CORS_PROXIES) {
         try {
-            const res = await fetch(buildProxyUrl(url));
+            const res = await fetchWithTimeout(buildProxyUrl(url));
             if (!res.ok) {
                 lastError = new Error(`proxy respondeu status ${res.status}`);
                 continue;
@@ -461,9 +481,13 @@ async function fetchHtmlViaProxy(url) {
                 lastError = new Error('proxy retornou uma resposta vazia/curta');
                 continue;
             }
+            if (hostHint && !text.toLowerCase().includes(hostHint)) {
+                lastError = new Error('proxy retornou uma página que não parece ser o site de destino (provavelmente devolveu a própria página do proxy)');
+                continue;
+            }
             return text;
         } catch (e) {
-            lastError = e;
+            lastError = e.name === 'AbortError' ? new Error('proxy demorou demais para responder') : e;
         }
     }
     throw new Error(`Não foi possível acessar a página (todos os proxies falharam: ${lastError?.message || 'erro desconhecido'})`);
@@ -474,14 +498,14 @@ async function fetchJsonViaProxy(url) {
     let lastError = null;
     for (const buildProxyUrl of CORS_PROXIES) {
         try {
-            const res = await fetch(buildProxyUrl(url));
+            const res = await fetchWithTimeout(buildProxyUrl(url));
             if (!res.ok) {
                 lastError = new Error(`proxy respondeu status ${res.status}`);
                 continue;
             }
             return await res.json();
         } catch (e) {
-            lastError = e;
+            lastError = e.name === 'AbortError' ? new Error('proxy demorou demais para responder') : e;
         }
     }
     throw new Error(`Não foi possível consultar a API (todos os proxies falharam: ${lastError?.message || 'erro desconhecido'})`);
@@ -608,6 +632,8 @@ async function fetchAlbumData(albumId) {
             trackId: t.trackId || idx + 1,
             trackName: t.trackName,
             artistName: t.artistName,
+            albumName: t.collectionName || albumMetaData?.collectionName || '',
+            durationMs: t.trackTimeMillis || null,
             composerName: t.composerName || t.artistName,
             geniusDirectUrl: null,
             geniusSongId: null
@@ -624,7 +650,7 @@ async function fetchAlbumData(albumId) {
 
     } catch (error) {
         console.error(error);
-        alert('Erro ao carregar dados do álbum no Apple Music. Verifique sua conexão.');
+        alert(`Erro ao carregar dados do álbum no Apple Music: ${error.message || 'verifique sua conexão'}. Abra o Console do navegador (F12) para mais detalhes.`);
     }
 }
 
@@ -984,22 +1010,71 @@ async function fetchLyricsFromLRCLIB(track) {
     const artist = track.artistName;
     const trackName = track.trackName;
     const appleComposer = track.composerName || 'Não informado';
+    const durationSec = track.durationMs ? Math.round(track.durationMs / 1000) : null;
 
+    // 1ª tentativa: /api/get faz correspondência EXATA (artista + título +
+    // álbum + duração). É a mais confiável quando bate, mas uma pequena
+    // diferença de metadados (ex: nome do álbum com "Deluxe Edition") já
+    // faz retornar 404 mesmo com a letra existindo na base.
+    if (track.albumName && durationSec) {
+        try {
+            const params = new URLSearchParams({
+                artist_name: artist,
+                track_name: trackName,
+                album_name: track.albumName,
+                duration: durationSec
+            });
+            const response = await fetch(`https://lrclib.net/api/get?${params.toString()}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.plainLyrics) {
+                    return { hasLyrics: true, plainLyrics: data.plainLyrics, writerName: data.author || appleComposer };
+                }
+            }
+        } catch (e) {
+            console.warn('LRCLIB /api/get falhou, tentando /api/search:', e);
+        }
+    }
+
+    // 2ª tentativa: /api/search é uma busca "fuzzy" (não exige álbum/duração
+    // exatos) e devolve uma lista de candidatos — muito mais tolerante a
+    // diferenças de metadados entre o Apple Music e a base da LRCLIB. Esta
+    // era a maior falha do código anterior: ele usava só o /api/get sem
+    // álbum/duração, que praticamente nunca resulta em correspondência.
     try {
-        const response = await fetch(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(trackName)}`);
+        const params = new URLSearchParams({ artist_name: artist, track_name: trackName });
+        const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`);
         if (response.ok) {
-            const data = await response.json();
-            return {
-                hasLyrics: !!data.plainLyrics,
-                plainLyrics: data.plainLyrics || 'Letra não encontrada.',
-                writerName: data.author || appleComposer
-            };
+            const results = await response.json();
+            if (Array.isArray(results) && results.length > 0) {
+                const targetTrackNorm = cleanSongTitle(trackName);
+                const targetArtistNorm = normalizeStr(artist);
+
+                const scored = results
+                    .filter(r => r.plainLyrics)
+                    .map(r => {
+                        const titleNorm = cleanSongTitle(r.trackName);
+                        const artistNorm = normalizeStr(r.artistName);
+                        let score = 0;
+                        if (artistNorm && targetArtistNorm && (artistNorm.includes(targetArtistNorm) || targetArtistNorm.includes(artistNorm))) score += 2;
+                        if (titleNorm && targetTrackNorm && (titleNorm.includes(targetTrackNorm) || targetTrackNorm.includes(titleNorm))) score += 2;
+                        if (durationSec && Math.abs((r.duration || 0) - durationSec) <= 3) score += 1;
+                        return { r, score };
+                    })
+                    .sort((a, b) => b.score - a.score);
+
+                if (scored.length > 0 && scored[0].score > 0) {
+                    const best = scored[0].r;
+                    return { hasLyrics: true, plainLyrics: best.plainLyrics, writerName: best.author || appleComposer };
+                }
+            }
         }
     } catch (e) {
         console.error('Erro LRCLIB:', e);
+        return { hasLyrics: false, plainLyrics: `Erro ao consultar a LRCLIB (${e.message || 'motivo desconhecido'}).`, writerName: appleComposer };
     }
 
-    return { hasLyrics: false, plainLyrics: 'Letra indisponível na LRCLIB.', writerName: appleComposer };
+    return { hasLyrics: false, plainLyrics: 'Letra não encontrada na LRCLIB.', writerName: appleComposer };
 }
 
 async function selectTrack(trackId, forceRefresh = false) {
